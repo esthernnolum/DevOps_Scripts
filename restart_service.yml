@@ -1,0 +1,24 @@
+---
+- name: service module demo
+  hosts: all
+  serial: 10
+  become_method: runas
+  gather_facts: true
+  ignore_unreachable: false
+  
+  vars:
+    service: <servicename>
+  tasks:
+    - name: service restart
+      win_service:
+        name: '{{ service }}'
+        state: restarted
+        enabled: true
+
+    - name: Get the service info after restarting the services # win_service_info module not available for ansible 2.9
+      win_service:
+        name: '{{ item }}'
+      with_items: '{{ service }}'
+      register: service_info
+  
+    - debug: var=service_info
