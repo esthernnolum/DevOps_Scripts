@@ -1,0 +1,21 @@
+# copy a window folder recursively from serverA to serverB via serverC(ansible)
+---
+- hosts: servera
+  gather_facts: true
+  ignore_unreachable: false
+
+  vars:
+    usr_pass: 'usr_password'
+  tasks: 
+    - name: Sync ServerA to ServerB
+      become: yes
+      become_method: runas
+      become_user: 'user_name'
+      vars: 
+        ansible_become_pass: '{{ usr_pass }}'
+      win_robocopy:
+        src: 'servera_folder_path'
+        dest: '\\serverb\folder_path '
+        recurse: yes
+        purge: yes
+
