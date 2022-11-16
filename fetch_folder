@@ -1,0 +1,15 @@
+# Fetching a directory from a remote host is not currently supported by the fetch module but you can zip the folder and fetch
+---
+- hosts: serverA
+  gather_facts: true
+  become_method: runas
+  ignore_unreachable: false
+
+  tasks: 
+    - name: Fetch the file from the serverA to master
+      run_once: yes
+      fetch: src=/serverA_folder_path/folder.zip dest=buffer/ flat=yes 
+    - name: Copy the file from master to serverB
+      win_copy: src=buffer/folder.zip dest=dest_folder_path
+      delegate_to: serverB
+      register: copy_out
