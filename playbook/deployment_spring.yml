@@ -1,0 +1,81 @@
+# This playbook is responsible for copying supplied installer artifacts to their respective locations.
+
+---
+
+- hosts: '{{ host }}'
+  strategy: free
+  serial: 1
+  become_method: runas
+  gather_facts: false
+  
+  vars:
+    app_name: '{{ instance }}'
+
+  tasks:
+  - name: Include variable file
+    include_vars:
+      file: 'vars/artifact.yml'  
+
+  - name: 2 >>> new variable with current date time
+    set_fact: temp="{{lookup('pipe','date \"+%Y-%m-%d_TIME:%H:%M\"')}}"
+    
+  - name: 3 >>> print variable
+    debug: msg="Current date and time is {{temp}}"
+
+  - name: 5 >>> get file stat to be able to perform a check in the following task
+    stat:
+      path: '{{ linux_spring_backup_path }}'
+    register: result 
+
+  - debug: var=result
+
+  - set_fact: mydate="{{lookup('pipe','date +%Y-%m-%d_%H-%M-%S')}}"
+  - debug: var=mydate
+ 
+  - name: Create backup directory if it doesn't exist
+    file:
+      path: '{{ linux_spring_backup_path }}'
+      state: directory
+    ignore_errors: yes
+  
+  #Get services info
+  - name: check if a service is installed
+    service:
+      name: '{{ service }}'
+    register: service_info
+
+  # Stop services before backup and deployment
+  - name: Stop a service
+    service:
+      name: '{{ service }}'
+      state: stopped
+
+  - name: Backup the existing artifact build
+    copy:
+      src: '{{ linux_spring_deployment_path }}/{{ current_component }}.jar'
+      dest: '{{ linux_spring_backup_path }}/{{ current_component }}.jar__{{ mydate }}'
+      remote_src: True
+    ignore_errors: yes
+    when: result.stat.exists == true
+
+  - name: Remove a build, if present
+    file:
+      path: '{{ linux_spring_deployment_path }}/{{ current_component }}.jar'
+      state: absent 
+
+  - name: Deploy the artifact to the deployment folder
+    copy:
+      src: '{{ linux_spring_source_path }}/{{ current_component }}.jar'
+      dest: '{{ linux_spring_deployment_path }}/{{ current_component }}.jar'
+
+  - name: Confirm the build is deployed
+    wait_for:
+      path: '{{ linux_spring_deployment_path }}/{{ current_component }}.jar'
+      timeout: 120
+    poll: 1
+
+  #Start services after backup and deployment
+  - name: Start a service
+    service:
+      name: '{{ service }}'
+      state: started
