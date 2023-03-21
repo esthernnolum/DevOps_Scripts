@@ -1,0 +1,102 @@
+# This playbook is responsible for deploying facematch Artifacts to the prod environments using jenkins.
+---
+
+- hosts: '{{ host }}
+  strategy: free
+  serial: 10
+  become_method: runas
+  gather_facts: true
+  any_errors_fatal: true
+  ignore_unreachable: false
+  
+  vars:
+    app_name: '{{ instance }}'
+
+  tasks:
+  - name: Include variable file
+    include_vars:
+      file: 'vars/artifacts.yml'
+    
+  - name: 2 >>> new variable with current date time
+    set_fact: temp="{{lookup('pipe','date \"+%Y-%m-%d_TIME:%H:%M\"')}}"
+
+  - name: 3 >>> print variable
+    debug: msg="Current date and time is {{temp}}"
+
+  - name: 4 >>> print variable
+    debug: msg="Current date and time is {{temp}}"
+
+
+  - name: 5 >>> get file stat to be able to perform a check in the following task
+    win_stat:
+      path: '{{ facematchservice_backup_path }}'
+    register: result
+
+  - debug: var=result
+
+  - set_fact: mydate="{{lookup('pipe','date +%Y-%m-%d_%H-%M-%S')}}"
+  - debug: var=mydate
+
+  - name: Create backup directory if it doesn't exist
+    win_file:
+      path: '{{ facematchservice_backup_path }}'
+      state: directory
+    
+  - name: Confirm '{{ item }}\{{ current_component }}.war' is present
+    win_stat:
+      path: '{{ item }}\{{ current_component }}.war'
+    with_items: "{{ facematchservice_deployment_paths }}"
+    register: result 
+    tags: deployment
+
+  - debug: var=result
+
+  - name: Backup the existing artifact build
+    win_copy:
+      src: '{{ facematchservice_deployment_paths[0] }}\{{ current_component }}.war'
+      dest: '{{ facematchservice_backup_path }}\{{ current_component }}.war_{{ mydate }}'
+      remote_src: True
+    when: 
+      - result.results[0].stat.exists == true
+      # - result.results[1].stat.exists == true
+    tags: deployment
+
+  - name: Remove a build, if present
+    win_file:
+      path: '{{ item }}\{{ current_component }}.war'
+      state: absent
+    with_items: '{{ facematchservice_deployment_paths }}'
+    tags: deployment
+
+  - name: Remove the .deployed file, if present
+    win_file:
+      path: '{{ item }}\{{ current_component }}.war.deployed'
+      state: absent
+    with_items: '{{ facematchservice_deployment_paths }}' 
+    tags: deployment
+
+  - name: Remove a .undeployed, if present
+    win_file:
+      path: '{{ item }}\{{ current_component }}.war.undeployed'
+      state: absent
+    with_items: '{{ facematchservice_deployment_paths }}'
+    ignore_errors: true
+    tags: deployment
+
+  - name: Deploy the artifact to the deployment folder
+    win_copy:
+      src: '{{ facematchservice_source_path }}/{{ current_component }}.war'
+      dest: '{{ item }}\{{ current_component }}.war'
+    with_items: '{{ facematchservice_deployment_paths }}'
+    tags: deployment
+
+  - name: Confirm the build is deployed
+    win_wait_for:
+      path: '{{ item }}\{{ current_component }}.war.deployed'
+      timeout: 120
+    poll: 1
+    with_items: '{{ facematchservice_deployment_paths }}'
+    register: deployment_status
+    tags: deployment
+
+  - debug: var=deployment_status
