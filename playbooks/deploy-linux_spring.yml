@@ -1,15 +1,18 @@
-# This playbook is responsible for copying supplied installer artifacts to their respective locations.
+# This playbook is responsible for deploying installer artifacts to their respective locations.
 
 ---
 
 - hosts: '{{ host }}'
   strategy: free
-  serial: 1
+  serial: 10
   become_method: runas
   gather_facts: false
   
   vars:
     app_name: '{{ instance }}'
+    linux_spring_backup_path: '/data/fix/_bio/sw/{{ instance }}/backup'
+    linux_spring_deployment_path: '/data/fix/_bio/sw/{{ instance }}'
+    linux_spring_source_path: '/var/lib/jenkins/workspace/{{ jenkins_job }}/target'
 
   tasks:
   - name: Include variable file
