@@ -1,102 +1,93 @@
-# This playbook is responsible for deploying facematch Artifacts to the prod environments using jenkins.
----
+# This playbook is responsible for deploying  Artifacts to specified windows server from jenkins.
 
-- hosts: '{{ host }}
+---
+- hosts: '{{ host }}'
   strategy: free
   serial: 10
   become_method: runas
   gather_facts: true
-  any_errors_fatal: true
-  ignore_unreachable: false
-  
+
   vars:
-    app_name: '{{ instance }}'
+    instance_count: '{{ instance_count }}'
+    win_backup_path: 'E:\backup\AUTOMATED_BACKUPS\{{ current_component }}'
+    source_path: '/var/lib/jenkins/workspace/{{ jenkins_job }}/target'
+    wf_deploy_path: 'E:\data'
 
   tasks:
-  - name: Include variable file
-    include_vars:
-      file: 'vars/artifacts.yml'
-    
-  - name: 2 >>> new variable with current date time
-    set_fact: temp="{{lookup('pipe','date \"+%Y-%m-%d_TIME:%H:%M\"')}}"
+    - name: 2 >>> new variable with current date time
+      set_fact: temp="{{lookup('pipe','date \"+%Y-%m-%d_TIME:%H:%M\"')}}"
 
-  - name: 3 >>> print variable
-    debug: msg="Current date and time is {{temp}}"
+    - name: 3 >>> print variable
+      debug: msg="Current date and time is {{temp}}"
 
-  - name: 4 >>> print variable
-    debug: msg="Current date and time is {{temp}}"
+    - name: 4 >>> get file stat to be able to perform a check in the following task
+      win_stat:
+        path: "{{ item }}"
+      with_items: "{{ win_backup_path }}"
+   
+    - set_fact: mydate="{{lookup('pipe','date +%Y-%m-%d_%H-%M-%S')}}"
+    - debug: var=mydate
 
+    - set_fact:
+        instance: "{{ instance | default([]) + ['{{ wf_deploy_instance }}_0%s' | format(item + 1)] }}"
+      loop: "{{ range(0, instance_count | int ) | list }}"    
+    - debug: var=instance
 
-  - name: 5 >>> get file stat to be able to perform a check in the following task
-    win_stat:
-      path: '{{ facematchservice_backup_path }}'
-    register: result
+    - name: Create backup directory in the instances if it does not exist
+      win_file:
+        path: "{{ item }}"
+        state: directory
+      with_items: "{{ win_backup_path }}"
 
-  - debug: var=result
+    - name: Confirm '{{ item }}\{{ current_component }}.war' is present in all instances
+      win_stat:
+        path: '{{ wf_deploy_path }}\{{ item }}\standalone\deployments\{{ current_component }}.war'
+      with_items: "{{ instance }}"
+      register: result
+    - debug: var=result
 
-  - set_fact: mydate="{{lookup('pipe','date +%Y-%m-%d_%H-%M-%S')}}"
-  - debug: var=mydate
+    # same artifact is deployed across app instances, so use only one backup directory, to save diskspace
+    - name: Backup the existing artifact build on the first instance
+      win_copy:
+        src: '{{ wf_deploy_path }}\{{ item }}\standalone\deployments\{{ current_component }}.war'
+        dest: '{{ win_backup_path }}\{{ current_component }}.war_{{ mydate }}'
+        remote_src: True
+      with_items: "{{ instance }}"
+      when: result.results[0].stat.exists == true
 
-  - name: Create backup directory if it doesn't exist
-    win_file:
-      path: '{{ facematchservice_backup_path }}'
-      state: directory
-    
-  - name: Confirm '{{ item }}\{{ current_component }}.war' is present
-    win_stat:
-      path: '{{ item }}\{{ current_component }}.war'
-    with_items: "{{ facematchservice_deployment_paths }}"
-    register: result 
-    tags: deployment
+    - name: Remove a build from all the instances, if present
+      win_file:
+        path: '{{ wf_deploy_path}}\{{ item }}\standalone\deployments\{{ current_component }}.war'
+        state: absent
+      with_items: "{{ instance }}"
 
-  - debug: var=result
+    - name: Remove the .deployed file from all the instances, if present
+      win_file:
+        path: '{{ wf_deploy_path }}\{{ item }}\standalone\deployments\{{ current_component }}.war.deployed'
+        state: absent
+      with_items: "{{ instance }}"
 
-  - name: Backup the existing artifact build
-    win_copy:
-      src: '{{ facematchservice_deployment_paths[0] }}\{{ current_component }}.war'
-      dest: '{{ facematchservice_backup_path }}\{{ current_component }}.war_{{ mydate }}'
-      remote_src: True
-    when: 
-      - result.results[0].stat.exists == true
-      # - result.results[1].stat.exists == true
-    tags: deployment
+    - name: Remove the .undeployed file from all the instances, if present
+      win_file:
+        path: '{{ wf_deploy_path }}\{{ item }}\standalone\deployments\{{ current_component }}.war.undeployed'
+        state: absent
+      with_items: "{{ instance }}"
 
-  - name: Remove a build, if present
-    win_file:
-      path: '{{ item }}\{{ current_component }}.war'
-      state: absent
-    with_items: '{{ facematchservice_deployment_paths }}'
-    tags: deployment
+    - name: Deploy the artifact to the deployment folder across all the instances
+      win_copy:
+        src: "{{ source_path }}/{{ current_component }}.war"
+        dest: '{{ wf_deploy_path}}\{{ item }}\standalone\deployments\{{ current_component }}.war'
+      with_items: "{{ instance }}"
+      
+    - name: Remove the .failed file from all the instances, if present
+      win_file:
+        path: '{{ wf_deploy_path }}\{{ item }}\standalone\deployments\{{ current_component }}.war.failed'
+        state: absent
+      with_items: "{{ instance }}" 
 
-  - name: Remove the .deployed file, if present
-    win_file:
-      path: '{{ item }}\{{ current_component }}.war.deployed'
-      state: absent
-    with_items: '{{ facematchservice_deployment_paths }}' 
-    tags: deployment
-
-  - name: Remove a .undeployed, if present
-    win_file:
-      path: '{{ item }}\{{ current_component }}.war.undeployed'
-      state: absent
-    with_items: '{{ facematchservice_deployment_paths }}'
-    ignore_errors: true
-    tags: deployment
-
-  - name: Deploy the artifact to the deployment folder
-    win_copy:
-      src: '{{ facematchservice_source_path }}/{{ current_component }}.war'
-      dest: '{{ item }}\{{ current_component }}.war'
-    with_items: '{{ facematchservice_deployment_paths }}'
-    tags: deployment
-
-  - name: Confirm the build is deployed
-    win_wait_for:
-      path: '{{ item }}\{{ current_component }}.war.deployed'
-      timeout: 120
-    poll: 1
-    with_items: '{{ facematchservice_deployment_paths }}'
-    register: deployment_status
-    tags: deployment
-
-  - debug: var=deployment_status
+    - name: Confirm the build is deployed across all the instances
+      win_wait_for:
+        path: '{{ wf_deploy_path }}\{{ item }}\standalone\deployments\{{ current_component }}.war.deployed'
+        timeout: 180
+      poll: 1
+      with_items: "{{ instance }}"
