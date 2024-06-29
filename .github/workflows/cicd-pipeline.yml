@@ -1,0 +1,113 @@
+name: CICD Pipeline
+on:
+  push:
+    branches:
+      - "dev"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v2
+        with:
+          ref: 'dev'
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+        
+      - name: Determine Image Tag
+        id: determine-tag
+        run: echo "::set-output name=tag::$(if [ -n "$GITHUB_TAG" ]; then echo $GITHUB_TAG; else echo $GITHUB_RUN_NUMBER; fi)"
+
+      - name: Build, tag, and push image to Amazon ECR 🏷
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: "dev/my-project"
+          IMAGE_TAG: ${{ steps.determine-tag.outputs.tag }}
+        run: |
+          echo "$IMAGE_TAG"
+          echo "NODE_ENV=dev" > .env
+          echo "DB_PASSWORD='${{ secrets.DEV_DATABASE_PASSWORD }}'" >> .env
+          echo "DB_USERNAME=${{ secrets.DEV_DATABASE_USERNAME }}" >> .env
+          echo "DB_HOST=${{ secrets.DEV_DATABASE_HOST }}" >> .env
+          echo "DB_PORT=${{ secrets.XNETT_DEV_DATABASE_PORT }}" >> .env
+          echo "DB_NAME=test_db_dev" >> .env
+          cat .env
+          ls -la
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f Dockerfile .
+          docker images
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          
+      - uses: actions/checkout@v2 
+      
+      - name: Executing remote ssh commands using ssh key
+        uses: appleboy/ssh-action@master
+        with:
+          username: ubuntu
+          key: ${{ secrets.SSH_KEY }}
+          host: ${{ secrets.HOST_IP }}
+          port: ${{ secrets.SSH_PORT }}
+          script: |
+            set -e
+
+            IMAGE_NAME=${{ steps.login-ecr.outputs.registry }}/dev/my-project:${{ steps.determine-tag.outputs.tag }}
+            CONTAINER_NAME=my-project
+            ENV_FILE=/home/ubuntu/test/.env
+            HEALTH_CHECK_URL=http://localhost:8081/api#/healthcheck
+
+            determine_previous_tag() {
+              current_tag=${{ steps.determine-tag.outputs.tag }}
+              echo $((current_tag - 1))
+              }
+
+            PREVIOUS_TAG=$(determine_previous_tag)
+            PREVIOUS_IMAGE_NAME=${{ steps.login-ecr.outputs.registry }}/dev/my-project:${PREVIOUS_TAG}
+            echo "Previous image name: $PREVIOUS_IMAGE_NAME"
+
+            aws ecr get-login-password --region eu-west-2 | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+
+            docker pull $IMAGE_NAME
+
+            docker stop $CONTAINER_NAME
+
+            docker commit $CONTAINER_NAME ${CONTAINER_NAME}_backup
+
+            docker rm $CONTAINER_NAME
+
+            docker run -id -p 8081:8081 --name $CONTAINER_NAME --env-file=/home/ubuntu/test/.env --restart always $IMAGE_NAME
+
+            timeout=30
+            interval=5
+            while [ $timeout -gt 0 ]; do
+              if curl -fs $HEALTH_CHECK_URL; then
+                echo "New container is healthy."
+                break
+              else
+                echo "Waiting for the new container to be healthy..."
+                sleep $interval
+                timeout=$((timeout - interval))
+              fi
+            done
+
+            if [ $timeout -le 0 ]; then
+              echo "New container failed to become healthy. Rolling back..."
+              docker stop $CONTAINER_NAME
+              docker rm $CONTAINER_NAME
+              docker run -id -p 8081:8081 --name $CONTAINER_NAME --env-file=$ENV_FILE --restart always ${CONTAINER_NAME}_backup
+              exit 1
+            fi
+
+            docker rmi ${CONTAINER_NAME}_backup
+            docker rmi ${PREVIOUS_IMAGE_NAME} || true
+            docker image prune -f
