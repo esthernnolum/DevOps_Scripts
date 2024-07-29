@@ -1,0 +1,121 @@
+stages:
+  - build
+  - deploy
+
+variables:
+    # Use the overlayfs driver for improved performance:
+  ECR_REPOSITORY: "xnett-dev/document-management"
+  IMAGE_TAG: "$CI_PIPELINE_IID"
+  AWS_ECR_REGISTRY: $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+
+before_script:
+  - echo "XNETT_NODE_ENV=dev" > .env
+  - echo "DB_PASSWORD=${DEV_DATABASE_PASSWORD}" >> .env
+  - echo "DB_USERNAME=${DEV_DATABASE_USERNAME}" >> .env
+  - echo "DB_HOST=${DEV_DATABASE_HOST}" >> .env
+  - echo "DB_PORT=${XNETT_DEV_DATABASE_PORT}" >> .env
+  - echo "DB_NAME=xnett_db_dev" >> .env
+  - echo "VTU_USERNAME=${VTU_USERNAME}" >> .env
+  - echo "VTU_PASSWORD=${VTU_PASSWORD}" >> .env
+  - cat .env
+  - pwd
+  - apk add --no-cache python3 py3-pip
+  - pip3 install awscli --break-system-packages
+  - aws --version
+  - |
+      echo $AWS_DEFAULT_REGION
+      echo $AWS_ECR_REGISTRY
+      export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+      export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+      export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION
+
+  - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ECR_REGISTRY
+
+build:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375/
+    DOCKER_DRIVER: overlay2
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - docker build -t $AWS_ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f Dockerfile .
+    - docker images
+    - docker push $AWS_ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+deploy:
+  stage: deploy
+  image: docker:latest
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375/
+    DOCKER_DRIVER: overlay2
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - |
+      echo "$SSH_PEM" | base64 -d > server_key.pem
+      chmod 600 server_key.pem
+
+      #  Transfer the .env file to the project root on the remote server
+    - scp -o StrictHostKeyChecking=no -i server_key.pem -P $SSH_PORT .env ubuntu@$HOST_IP:/home/ubuntu/.env
+       
+    - |
+      ssh -o StrictHostKeyChecking=no -i server_key.pem -p $SSH_PORT ubuntu@$HOST_IP << EOF
+        set -e
+
+        ECR_REPOSITORY="xnett-dev/document-management"
+        IMAGE_TAG="$CI_PIPELINE_IID"
+        IMAGE_NAME=$AWS_ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        CONTAINER_NAME=document-management-service
+        ENV_FILE=/home/ubuntu/.env
+        HEALTH_CHECK_URL=http://localhost:9097/file-management-service/api
+
+        determine_previous_tag() {
+          current_tag=\$IMAGE_TAG
+          echo \$((current_tag - 1))
+        }
+        PREVIOUS_TAG=\$(determine_previous_tag)
+        PREVIOUS_IMAGE_NAME=$AWS_ECR_REGISTRY/\$ECR_REPOSITORY:\$PREVIOUS_TAG
+        echo "Previous image name: \$PREVIOUS_IMAGE_NAME"
+        aws ecr get-login-password --region eu-west-2 | docker login --username AWS --password-stdin $AWS_ECR_REGISTRY
+        echo $IMAGE_NAME
+        docker pull \$IMAGE_NAME
+
+        docker stop \$CONTAINER_NAME
+
+        docker commit \$CONTAINER_NAME \${CONTAINER_NAME}_backup
+
+        docker rm \$CONTAINER_NAME
+
+        docker run -id -p 9097:9097 --name \$CONTAINER_NAME --env-file=\$ENV_FILE --restart always \$IMAGE_NAME
+
+        timeout=90
+        interval=5
+        while [ \$timeout -gt 0 ]; do
+          if curl -fs \$HEALTH_CHECK_URL; then
+            echo "New container is healthy."
+            break
+          else
+            echo "Waiting for the new container to be healthy..."
+            sleep \$interval
+            timeout=\$((timeout - interval))
+          fi
+        done
+
+        if [ \$timeout -le 0 ]; then
+          echo "New container failed to become healthy. Rolling back..."
+          docker stop \$CONTAINER_NAME
+          docker rm \$CONTAINER_NAME
+          docker run -id -p 9097:9097 --name \$CONTAINER_NAME --env-file=\$ENV_FILE --restart always \${CONTAINER_NAME}_backup
+          exit 1
+        fi
+
+        docker rmi \${CONTAINER_NAME}_backup
+        docker rmi \${PREVIOUS_IMAGE_NAME} || true
+        docker image prune -f
+      EOF
+  only:
+    - dev
